@@ -29,6 +29,22 @@ from getopt import getopt
 # TL; DR, the main training process starts on line: 250,
 # you may want to start reading the code from there
 
+def selectLearner(learners, inst):
+    selected = None
+    for learner, predicate in learners:
+        if predicate(inst):
+            if selected == None:
+                selected = learner
+            else:
+                print "Mupltiple learners for an instance!!!!!"
+                exit(1)
+
+    if learner:
+        return learner
+    else:
+        print "No learner!!!!!"
+        exit(1)
+
 
 def myFloat(str):
     if str=='':
@@ -257,8 +273,8 @@ class ftrl_proximal(object):
     
         # update z and n
         normConst = (1. / sqrt(len(x)) , 1. ) [not param.norm]
-        g_i = g * normConst
         for i in self._indices(x):
+            g_i = g * normConst
             sigma = (sqrt(n[i] + g_i * g_i) - sqrt(n[i])) / alpha
             z[i] += normConst * g_i - sigma * w[i]
             n[i] += g_i * g_i
@@ -398,10 +414,11 @@ def data(file, D, aggregator, aggregationFlag):
 
 if __name__ == "__main__":
 
-    param = Param()
-    dataPath=''    
+    param = Param()    
     requiredOptList = ['-d']
     optList,argv = getopt(sys.argv[1:],'ha:b:l:L:D:Ie:d:v:AN')
+    
+    
     if not optList:
         optList.append(('-h', None))
     
@@ -464,7 +481,9 @@ if __name__ == "__main__":
             print ("{} is required." % opt)
     
     # initialize ourselves a learner
-    learner = ftrl_proximal(param)
+    learners = []
+    learners.append((ftrl_proximal(param),lambda inst:inst['mobilePlatform']))
+    learners.append((ftrl_proximal(param),lambda inst:not inst['mobilePlatform']))
 
     # start training
     print 'date:time\telapsed time\tvalidation logloss\ttraining logloss'
@@ -481,6 +500,7 @@ if __name__ == "__main__":
             valLogLoss = 0 
             valCount = 0
             for t, x, y, instance in data( file, param.D, aggregator, param.aggregation):
+                learner = selectLearner(learners,instance)                
                 # default compute log loss without sampling
                 valLogLoss += logloss(learner.predict(x),y)
                 valCount += 1
@@ -489,6 +509,7 @@ if __name__ == "__main__":
             for i in xrange(param.epoch):
                 trainLogLoss = 0
                 for t, x, y, instance in data( file, param.D, aggregator, param.aggregation):
+                    learner = selectLearner(learners,instance)
                     p = learner.predict(x)
                     trainLogLoss += logloss(p,y)
                     learner.update(x,p,y)

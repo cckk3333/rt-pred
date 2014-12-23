@@ -29,6 +29,21 @@ from getopt import getopt
 # TL; DR, the main training process starts on line: 250,
 # you may want to start reading the code from there
 
+def selectLearner(learners, inst):
+    selected = None
+    for learner, predicate in learners:
+        if predicate(inst):
+            if selected == None:
+                selected = learner
+            else:
+                print "Mupltiple learners for an instance!!!!!"
+                exit(1)
+
+    if selected:
+        return selected
+    else:
+        print "No learner!!!!!"
+        exit(1)
 
 def myFloat(str):
     if str=='':
@@ -67,7 +82,6 @@ class Aggregator():
                 self.counterMap[decayFactor][keyForUpdate][0] = self.counterMap[decayFactor][keyForUpdate][0] + 1. 
                 self.counterMap[decayFactor][keyForUpdate][1] = self.counterMap[decayFactor][keyForUpdate][1] + y == 1.
                 
-
     
     def genFeatures(self,instance):
         # default: generate CTR feature 
@@ -79,7 +93,6 @@ class Aggregator():
                     self.counterMap[decayFactor][keyForFeature] = [0.]*2 # (#clicks,#impressions)
                 yield decayFactor,keyForFeature,self.counterMap[decayFactor][keyForFeature]
         
-
 
     def decay(self,instance):
         # Since each file has 10-minute data and we decay once for each file, the decay unit is 10 minutes.
@@ -102,10 +115,12 @@ class Param():
         self.interaction = False     # whether to enable poly2 feature interactions
         self.aggregation = False     # whether to enable the aggregator
         self.norm = False            # whether to normalize the feature vector length  ( x <- x / sqrt(len(x))))
+        self.multiple = False        # whether to enable multiple models. If yes, please define models in code directly.
+
 
         # D, training/validation
         self.epoch = 1       # learn training data for N pass
-        self.vmode = 1       # validation mode. 1: bin 2: online
+        self.detectTC = False       # detect training logloss
         
 
     def __str__(self):
@@ -121,8 +136,6 @@ class Param():
 
         
         
-        
-
 ##############################################################################
 # class, function, generator definitions #####################################
 ##############################################################################
@@ -168,8 +181,9 @@ class ftrl_proximal(object):
         yield 0
 
         # then yield the normal indices
-        for index in x:
-            yield index
+        if self.interaction != 2:
+            for index in x:
+                yield index
 
         # now yield interactions (if applicable)
         if self.interaction:
@@ -254,13 +268,14 @@ class ftrl_proximal(object):
 
         # gradient under logloss
         g = p - y
-
+    
         # update z and n
         normConst = (1. / sqrt(len(x)) , 1. ) [not param.norm]
+        g_i = g * normConst
         for i in self._indices(x):
-            sigma = (sqrt(n[i] + g * g) - sqrt(n[i])) / alpha
-            z[i] += normConst * g - sigma * w[i]
-            n[i] += g * g
+            sigma = (sqrt(n[i] + g_i * g_i) - sqrt(n[i])) / alpha
+            z[i] += normConst * g_i - sigma * w[i]
+            n[i] += g_i * g_i
 
 
 def logloss(p, y):
@@ -279,7 +294,7 @@ def logloss(p, y):
 
 
 
-def data(file, D, aggregator, aggregationFlag):
+def data(file, D):
     ''' GENERATOR: Apply hash-trick to the original csv row
                    and for simplicity, we one-hot-encode everything
 
@@ -293,8 +308,14 @@ def data(file, D, aggregator, aggregationFlag):
                we only need the index since all values are either 0 or 1
             y: y = 1 if we have a click, else we have y = 0
     '''
-
+    mallCategoryMap = {}
+    with open('mallId.txt') as mallData:
+        for line in mallData:
+            words = line.split()
+            mallCategoryMap[words[0]] = words[1]
+    
     timeFormat = '%Y%m%d%H%M%S'
+    
     with gzip.open(file) as dataFile:
         dataReader = DictReader(dataFile,delimiter='\t')
         for t, instance in enumerate(dataReader):
@@ -338,7 +359,7 @@ def data(file, D, aggregator, aggregationFlag):
                 instance['adSessions'] = int(2.5 * log(myFloat(instance['adSessions']) + 1))
                 instance['decayedAdSessions'] = int(2.5 * log(myFloat(instance['decayedAdSessions'] ) + 1))
                 instance['adEffectiveViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adEffectiveViewsSinceLastVisit'] ) + 1))
-
+                
                 
                 ## lastBuySessionTime
                 if instance['lastBuySessionTime']:
@@ -352,7 +373,11 @@ def data(file, D, aggregator, aggregationFlag):
                     else:
                         instance['tdLastBST'] = int(log(tdLastBST.total_seconds() / 3600.0 + 1))
                
-                    del instance['lastBuySessionTime']
+                else:
+                    tdLastBST = 100000000 # just a huge number
+                    tdLogBST = 100000000 
+
+                del instance['lastBuySessionTime']
                 
                 ## findPriceTagTime
                 if instance['findPriceTagTime']:
@@ -361,8 +386,21 @@ def data(file, D, aggregator, aggregationFlag):
                     tdLastFt = lastVisitTime - ft
                     instance['tdLogFt'] = int(log(tdLogFt.total_seconds() / 3600.0 + 1))
                     instance['tdLastFt'] =(-1,1)[tdLastFt.days >= 0]* (int( log( abs(tdLastFt.total_seconds()) / 60 + 1)) + 1)
-                    del instance['findPriceTagTime']
+                
+                else:
+                    instance['tdLogFt'] = 100000000
+                    instance['tdLastFt'] = 100000000
+                
+                del instance['findPriceTagTime']
 
+
+                # manually generated feature:  Generating features by myself!!!!!!!!!!!!!!!!!!!!!!!!
+                
+                if not mallCategoryMap[instance['mallId']]:
+                    print "cannot find mall category. Mall ID:".format(instance['mallId'])
+                
+                instance['mallCategory'] = mallCategoryMap[instance['mallId']]
+                
 
                 #build x
                 x = []
@@ -371,14 +409,6 @@ def data(file, D, aggregator, aggregationFlag):
                     # one-hot encode everything with hash trick
                     index = abs(mmh3.hash(k + '_' + str(v))) % D
                     x.append(index)
-
-                #add aggregator features
-                if aggregationFlag:
-                    for df, key, stats in aggregator.genFeatures(instance):
-                        ctr = int( 5000 * stats[0] / ( stats[1] + 1. ))  # just handle the divide zero error
-                        index = mmh3.hash(str(df)+str(key)+str(ctr)) % D
-                        x.append(index)
-
 
             except BaseException as error:
                 print error
@@ -398,9 +428,8 @@ def data(file, D, aggregator, aggregationFlag):
 if __name__ == "__main__":
 
     param = Param()
-    dataPath=''    
     requiredOptList = ['-d']
-    optList,argv = getopt(sys.argv[1:],'ha:b:l:L:D:Ie:d:v:AN')
+    optList,argv = getopt(sys.argv[1:],'ha:b:l:L:D:I:e:d:AnVm')
     if not optList:
         optList.append(('-h', None))
     
@@ -415,11 +444,13 @@ if __name__ == "__main__":
             \t\t -l\t  L1 regularization. default l = 1
             \t\t -L\t  L2 regularization. default L = 1
             \t\t -D\t  #features for hashing trick. format: a**b. default D = 2**20
-            \t\t -I\t  enable interaction term.
+            \t\t -I\t  enable interaction term. 0: Not enable interaction    1: enable with linear terms   2. enable without linear terms
             \t\t -A\t  enable aggregation term.
             \t\t -e\t  epoch. deault e = 1
             \t\t -d\t  Required. data directory. 
             \t\t -n\t  enable feature vector normalization.  x = x / | x |
+            \t\t -V\t  detect training cost
+            \t\t -m\t  enable multiple models. You need to define models in code directly.
             '''
             exit()
 
@@ -436,7 +467,7 @@ if __name__ == "__main__":
             param.L2 = float(arg)
 
         elif opt == '-I':
-            param.interaction = True
+            param.interaction = int(arg)
 
         elif opt == '-D':
             base, pow = arg.split('**')
@@ -448,11 +479,14 @@ if __name__ == "__main__":
         elif opt == '-d':
             dataPath = arg
 
-        elif opt == '-v':
-            param.vmode = int(arg)
-
         elif opt == '-A':
             param.aggregation = True
+
+        elif opt == '-V':
+            param.detectTC = True
+        
+        elif opt == '-m':
+            param.multiple = True
 
         else:
             print ('oops!unknown parameter {}' % opt)
@@ -461,41 +495,67 @@ if __name__ == "__main__":
     for opt in requiredOptList:
         if opt not in [opt[0] for opt in optList]:
             print ("{} is required." % opt)
+            exit(0)
     
     # initialize ourselves a learner
-    learner = ftrl_proximal(param)
+    if not param.multiple:
+        learner = ftrl_proximal(param)
 
+    else:
+        learners = []
+        learners.append((ftrl_proximal(param),lambda inst:inst['mobilePlatform'] ))
+        learners.append((ftrl_proximal(param),lambda inst:not inst['mobilePlatform'] ))
+    
     # start training
-    print 'date:time\telapsed time\tvalidation logloss\ttraining logloss'
+    if not param.detectTC:
+        print 'date:time\telapsed time\tvalidation batch logloss\tvalidation online logloss'
+    else:
+        print 'date:time\telapsed time\tvalidation batch logloss\tvalidation online logloss\ttraining batch logloss'
     
     startTime = datetime.now()
-    aggregator = Aggregator()
+    # aggregator = Aggregator()
 
-    for date in xrange(20140701,20140708):
+    for date in xrange(20140701,20140731):
+        if date == 20140710:
+            continue
         for time in xrange(0,1440,10):
             file = os.path.join(dataPath,str(date),str(time) + '.txt.gz')
             # count log loss
             valLogLoss = 0 
             valCount = 0
-            for t, x, y, instance in data( file, param.D, aggregator, param.aggregation):
-                # default compute log loss without sampling
+            for t, x, y, instance in data( file, param.D):
+                if param.multiple:
+                    learner = selectLearner(learners,instance)                
                 valLogLoss += logloss(learner.predict(x),y)
                 valCount += 1
             
-            trainLogLossList =[]
+            valOnlineLogLoss = 0
+            
+            if param.detectTC:
+                trainingBatchLogLossList = []
+            
             for i in xrange(param.epoch):
                 trainLogLoss = 0
-                for t, x, y, instance in data( file, param.D, aggregator, param.aggregation):
+                for t, x, y, instance in data( file, param.D):
+                    if param.multiple:
+                        learner = selectLearner(learners,instance)
                     p = learner.predict(x)
-                    trainLogLoss += logloss(p,y)
+                    valOnlineLogLoss += logloss(p,y)
                     learner.update(x,p,y)
                     if (param.aggregation):
                         aggregator.update(instance,y)
                 
-                trainLogLossList.append(trainLogLoss/valCount)
+                if param.detectTC:
+                    trainingBatchLogLoss = 0
+                    for t, x, y, instance in data(file, param.D):
+                        if param.multiple:
+                            learner = selectLearner(learners,instance)
+                        p = learner.predict(x)
+                        trainingBatchLogLoss += logloss(p,y)
+                    trainingBatchLogLossList.append(trainingBatchLogLoss / valCount)
 
-            
-            print '{}:{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),valLogLoss/valCount,trainLogLossList)
 
-    
-
+            if not param.detectTC:
+                print '{}:{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),valLogLoss/valCount,valOnlineLogLoss/valCount)
+            else:
+                print '{}:{}\t{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),valLogLoss/valCount,valOnlineLogLoss/valCount,trainingBatchLogLossList)
