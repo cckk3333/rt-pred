@@ -91,7 +91,7 @@ class Aggregator():
 
 
 class Param():
-    def __init__(self, optlist):
+    def __init__(self, args):
         # B, model
         self.alpha = .1  # learning rate
         self.beta = 1.   # smoothing parameter for adaptive learning rate
@@ -105,14 +105,13 @@ class Param():
         self.norm = False            # whether to normalize the feature vector length  ( x <- x / sqrt(len(x))))
         self.multiple = False        # whether to enable multiple models. If yes, please define models in code directly.
         self.oFile = ''
-        self.dataPath = ''
 
         # D, training/validation
         self.epoch = 1       # learn training data for N pass
         self.detectTC = False       # detect training logloss
 
-        requiredOpt = ['-d']
 
+        optList,argv = getopt(args,'ha:b:l:L:D:I:e:AnVmo:')
         for opt, arg in optList:
             if opt == '-h':
                 print '''
@@ -134,48 +133,40 @@ class Param():
                 exit()
 
             elif opt == '-a':
-                param.alpha = float(arg)
+                self.alpha = float(arg)
             
             elif opt == '-b':
-                param.beta = float(arg)
+                self.beta = float(arg)
             
             elif opt == '-l':
-                param.L1 = float(arg)
+                self.L1 = float(arg)
 
             elif opt == '-L':
-                param.L2 = float(arg)
+                self.L2 = float(arg)
 
             elif opt == '-I':
-                param.interaction = int(arg)
+                self.interaction = int(arg)
 
             elif opt == '-D':
                 base, pow = arg.split('**')
-                param.D = int(base) ** int(pow)
+                self.D = int(base) ** int(pow)
         
             elif opt == '-e':
-                param.epoch = int(arg)
-            
-            elif opt == '-d':
-                self.dataPath = arg
+                self.epoch = int(arg)
 
             elif opt == '-A':
-                param.aggregation = True
+                self.aggregation = True
 
             elif opt == '-V':
-                param.detectTC = True
+                self.detectTC = True
             
             elif opt == '-m':
-                param.multiple = True
+                self.multiple = True
 
             elif opt == '-o':
-                param.oFile = arg
+                self.oFile = arg
             else:
-                print ('oops!unknown parameter {}' % opt)
-                exit(0)
-
-        for opt in requiredOpt:
-            if opt not in [opt for opt,arg in optList]:
-                print ("{} is required." % opt)
+                print ('oops!unknown selfeter {}' % opt)
                 exit(0)
         
 
@@ -349,9 +340,24 @@ def logloss(p, y):
     p = max(min(p, 1. - 10e-15), 10e-15)
     return -log(p) if y == 1. else -log(1. - p)
 
+def getMallCategoryMap():
+    map = {}
+    with open('mallId.txt') as mallData:
+        for line in mallData:
+            words = line.split()
+            map[words[0]] = words[1]       
+
+    return map
 
 
-def data(file, D, aggregator = None):
+def dataGenerator(fileStr):
+    with gzip.open(fileStr) as dataFile:
+        dataReader = DictReader(dataFile,delimiter='\t')
+        for instance in dataReader:
+            yield instance
+
+
+def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
     ''' GENERATOR: Apply hash-trick to the original csv row
                    and for simplicity, we one-hot-encode everything
 
@@ -365,140 +371,132 @@ def data(file, D, aggregator = None):
                we only need the index since all values are either 0 or 1
             y: y = 1 if we have a click, else we have y = 0
     '''
-    mallCategoryMap = {}
-    with open('mallId.txt') as mallData:
-        for line in mallData:
-            words = line.split()
-            mallCategoryMap[words[0]] = words[1]
     
     timeFormat = '%Y%m%d%H%M%S'
     
-    with gzip.open(file) as dataFile:
-        dataReader = DictReader(dataFile,delimiter='\t')
-        for t, instance in enumerate(dataReader):
-            # process target
-            try:
-                y = (0.0,1.0)[instance['y']=='1']
-                del instance['y']
+    # process target
+    try:
+        y = (0.0,1.0)[instance['y']=='1']
+        del instance['y']
 
-                # delete useless feature
-                del instance['impToken']
-                del instance['userSegment']
-                instance['campaign'] = instance['mallId'] + '_' + instance['campaign']
-                #del instance['campaign']
-                instance['publisherChannel'] = instance['publisher'] + '_' + instance['publisherChannel']
-                #del instance['publisherChannel']
-                siteCategory = instance['siteCategory']
-                del instance['siteCategory']
-                del instance['directDeal']
-                del instance['adViewBeginTimeOfLastSession']
+        # delete useless feature
+        del instance['impToken']
+        del instance['userSegment']
+        instance['campaign'] = instance['mallId'] + '_' + instance['campaign']
+        #del instance['campaign']
+        instance['publisherChannel'] = instance['publisher'] + '_' + instance['publisherChannel']
+        #del instance['publisherChannel']
+        siteCategory = instance['siteCategory']
+        del instance['siteCategory']
+        del instance['directDeal']
+        del instance['adViewBeginTimeOfLastSession']
+    
+
+        # feature Engineering
+        logTime = datetime.strptime(instance['logTime'],timeFormat)
+        lastVisitTime = datetime.strptime(instance['lastVisitTime'],timeFormat)
+        del instance['logTime']
+        del instance['lastVisitTime']
+        
+        instance['logT'] = ( logTime.hour * 60 + logTime.minute) / 30
+        instance['logD'] = logTime.day
+        instance['logW'] = logTime.weekday()
+        instance['lastT'] =  ( lastVisitTime.hour * 60 + lastVisitTime.minute ) / 30
+        instance['lastD'] = lastVisitTime.day
+        instance['lastW'] = lastVisitTime.weekday()
+        instance['tdLogLast'] = int(log((logTime - lastVisitTime).total_seconds() / 360.+ 1))
+
+        ##  binning
+        instance['visitSessions'] = int(2.5 * log(myFloat(instance['visitSessions']))) 
+        instance['visitsOfLastSession'] = int(2.5 * log(myFloat(instance['visitsOfLastSession'])))
+        instance['maxVisitsOfSession'] = int(log(myFloat(instance['maxVisitsOfSession'])))
+        instance['buySessions'] = int(2.5 * myFloat(instance['buySessions']) + 1)
+        instance['adViewsOfLastSession'] = int(2.5 * log( myFloat(instance['adViewsOfLastSession']) + 1))
+        instance['adEffectiveViewsOfLastSession'] = int(2.5 * log(myFloat(instance['adEffectiveViewsOfLastSession']) + 1))
+        instance['adViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adViewsSinceLastVisit']) + 1))                    
+        instance['adSessions'] = int(2.5 * log(myFloat(instance['adSessions']) + 1))
+        instance['decayedAdSessions'] = int(2.5 * log(myFloat(instance['decayedAdSessions'] ) + 1))
+        instance['adEffectiveViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adEffectiveViewsSinceLastVisit'] ) + 1))
+        
+        
+        ## lastBuySessionTime
+        if instance['lastBuySessionTime']:
+            lastBST = datetime.strptime(instance['lastBuySessionTime'],timeFormat)
+            tdLogBST = logTime - lastBST
+            tdLastBST = lastVisitTime - lastBST
             
+            instance['tdLogBST'] = int(log(tdLogBST.total_seconds() / 360. + 1))
+            if tdLastBST.days < 0:
+                instance['tdLastBST'] = -1
+            else:
+                instance['tdLastBST'] = int(log(tdLastBST.total_seconds() / 360. + 1))
+       
+        else:
+            tdLastBST = 100000000 # just a huge number
+            tdLogBST = 100000000 
 
-                # feature Engineering
-                logTime = datetime.strptime(instance['logTime'],timeFormat)
-                lastVisitTime = datetime.strptime(instance['lastVisitTime'],timeFormat)
-                del instance['logTime']
-                del instance['lastVisitTime']
-                
-                instance['logT'] = ( logTime.hour * 60 + logTime.minute) / 30
-                instance['logD'] = logTime.day
-                instance['logW'] = logTime.weekday()
-                instance['lastT'] =  ( lastVisitTime.hour * 60 + lastVisitTime.minute ) / 30
-                instance['lastD'] = lastVisitTime.day
-                instance['lastW'] = lastVisitTime.weekday()
-                instance['tdLogLast'] = int(log((logTime - lastVisitTime).total_seconds() / 360.+ 1))
-
-                ##  binning
-                instance['visitSessions'] = int(2.5 * log(myFloat(instance['visitSessions']))) 
-                instance['visitsOfLastSession'] = int(2.5 * log(myFloat(instance['visitsOfLastSession'])))
-                instance['maxVisitsOfSession'] = int(log(myFloat(instance['maxVisitsOfSession'])))
-                instance['buySessions'] = int(2.5 * myFloat(instance['buySessions']) + 1)
-                instance['adViewsOfLastSession'] = int(2.5 * log( myFloat(instance['adViewsOfLastSession']) + 1))
-                instance['adEffectiveViewsOfLastSession'] = int(2.5 * log(myFloat(instance['adEffectiveViewsOfLastSession']) + 1))
-                instance['adViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adViewsSinceLastVisit']) + 1))                    
-                instance['adSessions'] = int(2.5 * log(myFloat(instance['adSessions']) + 1))
-                instance['decayedAdSessions'] = int(2.5 * log(myFloat(instance['decayedAdSessions'] ) + 1))
-                instance['adEffectiveViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adEffectiveViewsSinceLastVisit'] ) + 1))
-                
-                
-                ## lastBuySessionTime
-                if instance['lastBuySessionTime']:
-                    lastBST = datetime.strptime(instance['lastBuySessionTime'],timeFormat)
-                    tdLogBST = logTime - lastBST
-                    tdLastBST = lastVisitTime - lastBST
-                    
-                    instance['tdLogBST'] = int(log(tdLogBST.total_seconds() / 360. + 1))
-                    if tdLastBST.days < 0:
-                        instance['tdLastBST'] = -1
-                    else:
-                        instance['tdLastBST'] = int(log(tdLastBST.total_seconds() / 360. + 1))
-               
-                else:
-                    tdLastBST = 100000000 # just a huge number
-                    tdLogBST = 100000000 
-
-                del instance['lastBuySessionTime']
-                
-                ## findPriceTagTime
-                if instance['findPriceTagTime']:
-                    ft = datetime.strptime(instance['findPriceTagTime'],timeFormat)
-                    tdLogFt = logTime - ft
-                    tdLastFt = lastVisitTime - ft
-                    instance['tdLogFt'] = int(log(tdLogFt.total_seconds() / 360. + 1))
-                    instance['tdLastFt'] =(-1,1)[tdLastFt.days >= 0]* (int( log( abs(tdLastFt.total_seconds()) / 360. + 1)) + 1)
-                
-                else:
-                    instance['tdLogFt'] = 100000000
-                    instance['tdLastFt'] = 100000000
-                
-                del instance['findPriceTagTime']
+        del instance['lastBuySessionTime']
+        
+        ## findPriceTagTime
+        if instance['findPriceTagTime']:
+            ft = datetime.strptime(instance['findPriceTagTime'],timeFormat)
+            tdLogFt = logTime - ft
+            tdLastFt = lastVisitTime - ft
+            instance['tdLogFt'] = int(log(tdLogFt.total_seconds() / 360. + 1))
+            instance['tdLastFt'] =(-1,1)[tdLastFt.days >= 0]* (int( log( abs(tdLastFt.total_seconds()) / 360. + 1)) + 1)
+        
+        else:
+            instance['tdLogFt'] = 100000000
+            instance['tdLastFt'] = 100000000
+        
+        del instance['findPriceTagTime']
 
 
-                # manually generated feature:  Generating features by myself!!!!!!!!!!!!!!!!!!!!!!!!
-                
-                if not mallCategoryMap[instance['mallId']]:
-                    print "cannot find mall category. Mall ID:".format(instance['mallId'])
-                
-                instance['mallCategory'] = mallCategoryMap[instance['mallId']]
-                
+        # manually generated feature:  Generating features by myself!!!!!!!!!!!!!!!!!!!!!!!!
+        
+        if not mallCategoryMap[instance['mallId']]:
+            print "cannot find mall category. Mall ID:".format(instance['mallId'])
+        
+        instance['mallCategory'] = mallCategoryMap[instance['mallId']]
+        
 
-                #build categorical features
-                x = []
+        #build categorical features
+        x = []
 
-                for k, v in instance.iteritems():
-                    # one-hot encode everything with hash trick
-                    index = abs(mmh3.hash(k + '_' + str(v))) % D 
-                    x.append((index,1.))
+        for k, v in instance.iteritems():
+            # one-hot encode everything with hash trick
+            index = abs(mmh3.hash(k + '_' + str(v))) % D 
+            x.append((index,1.))
 
-                #build numerical features
-                if siteCategory:
-                    for category in siteCategory.split('|'):
-                    
-                        words = category.split(':');
-                        try:
-                            catId, val = words[0], float(words[1])
-                        except BaseException:
-                            exit(0)
-
-                        x.append((mmh3.hash('siteCategory_'+catId) % D, val))
-
-                #build aggregator numerical feature
-                if aggregator:
-                    
-                    for feature in aggregator.genFeatures(instance,logTime,D):
-                        x.append(feature)
-                    
-                    aggregator.time = logTime
-                
-            except BaseException as error:
-                print error
-                print 'Error on line {}'.format(sys.exc_info()[-1].tb_lineno)
-                for k,v in instance.iteritems():
-                    print k,v
-                exit(0)
-
+        #build numerical features
+        if siteCategory:
+            for category in siteCategory.split('|'):
             
-            yield t, x, y, instance
+                words = category.split(':');
+                try:
+                    catId, val = words[0], float(words[1])
+                except BaseException:
+                    exit(0)
+
+                x.append((mmh3.hash('siteCategory_'+catId) % D, val))
+
+        #build aggregator numerical feature
+        if aggregator:
+            
+            for feature in aggregator.genFeatures(instance,logTime,D):
+                x.append(feature)
+            
+            aggregator.time = logTime
+        
+    except BaseException as error:
+        print error
+        print 'Error on line {}'.format(sys.exc_info()[-1].tb_lineno)
+        for k,v in instance.iteritems():
+            print k,v
+        exit(0)
+
+    
+    return x, y
 
 
 ##############################################################################
@@ -506,12 +504,10 @@ def data(file, D, aggregator = None):
 ##############################################################################
 
 if __name__ == "__main__":
-
-    optList,argv = getopt(sys.argv[1:],'ha:b:l:L:D:I:e:d:AnVmo:')
-    if not optList:
-        optList.append(('-h', None))
+    optList, argv =  (getopt(sys.argv[1:3],'d:'))
+    dataPath = optList[0][1] 
     
-    param = Param(optList)
+    param = Param(sys.argv[3:])
 
     # initialize ourselves a learner
     if not param.multiple:
@@ -537,11 +533,12 @@ if __name__ == "__main__":
         if date == 20140710:
             continue
         for time in xrange(0,1440,10):
-            file = os.path.join(param.dataPath,str(date),str(time) + '.txt.gz')
+            fileStr = os.path.join(dataPath,str(date),str(time) + '.txt.gz')
             # count log loss
             valLogLoss = 0 
             valCount = 0
-            for t, x, y, instance in data( file, param.D, aggregator):
+            for instance in dataGenerator(fileStr):
+                x, y = process(instance, param.D)
                 if param.multiple:
                     learner = selectLearner(learners,instance)                
                 valLogLoss += logloss(learner.predict(x),y)
@@ -554,7 +551,8 @@ if __name__ == "__main__":
             
             for i in xrange(param.epoch):
                 trainLogLoss = 0
-                for t, x, y, instance in data( file, param.D, aggregator):
+                for instance in dataGenerator(fileStr):
+                    x, y = process(instance, param.D)
                     if param.multiple:
                         learner = selectLearner(learners,instance)
                     p = learner.predict(x)
@@ -567,7 +565,8 @@ if __name__ == "__main__":
                 
                 if param.detectTC:
                     trainingBatchLogLoss = 0
-                    for t, x, y, instance in data(file, param.D):
+                    for instance in dataGenerator(fileStr):
+                        x, y = process(instance,param.D)
                         if param.multiple:
                             learner = selectLearner(learners,instance)
                         p = learner.predict(x)
