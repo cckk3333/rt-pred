@@ -105,14 +105,79 @@ class Param():
         self.norm = False            # whether to normalize the feature vector length  ( x <- x / sqrt(len(x))))
         self.multiple = False        # whether to enable multiple models. If yes, please define models in code directly.
         self.oFile = ''
+        self.dataPath = ''
 
         # D, training/validation
         self.epoch = 1       # learn training data for N pass
         self.detectTC = False       # detect training logloss
 
-        if optlist:
-    
+        requiredOpt = ['-d']
 
+        for opt, arg in optList:
+            if opt == '-h':
+                print '''
+                \t\t -h\t  see help
+                \t\t -a\t  alpha for learning rate. default a = .1
+                \t\t -b\t  smooth parameter for adaptive learning rate. default b = 1.
+                \t\t -l\t  L1 regularization. default l = 1
+                \t\t -L\t  L2 regularization. default L = 1
+                \t\t -D\t  #categorical features for hashing trick. format: a**b. default D = 2**25
+                \t\t -I\t  enable interaction term. 0: Not enable interaction    1: enable with linear terms   2. enable without linear terms
+                \t\t -A\t  enable aggregation term.
+                \t\t -e\t  epoch. deault e = 1
+                \t\t -d\t  Required. data directory. 
+                \t\t -n\t  enable feature vector normalization.  x = x / | x | . Depressed.
+                \t\t -V\t  detect training cost
+                \t\t -m\t  enable multiple models. You need to define models in code directly.
+                \t\t -o\t  outputFile if necessary
+                '''
+                exit()
+
+            elif opt == '-a':
+                param.alpha = float(arg)
+            
+            elif opt == '-b':
+                param.beta = float(arg)
+            
+            elif opt == '-l':
+                param.L1 = float(arg)
+
+            elif opt == '-L':
+                param.L2 = float(arg)
+
+            elif opt == '-I':
+                param.interaction = int(arg)
+
+            elif opt == '-D':
+                base, pow = arg.split('**')
+                param.D = int(base) ** int(pow)
+        
+            elif opt == '-e':
+                param.epoch = int(arg)
+            
+            elif opt == '-d':
+                self.dataPath = arg
+
+            elif opt == '-A':
+                param.aggregation = True
+
+            elif opt == '-V':
+                param.detectTC = True
+            
+            elif opt == '-m':
+                param.multiple = True
+
+            elif opt == '-o':
+                param.oFile = arg
+            else:
+                print ('oops!unknown parameter {}' % opt)
+                exit(0)
+
+        for opt in requiredOpt:
+            if opt not in [opt for opt,arg in optList]:
+                print ("{} is required." % opt)
+                exit(0)
+        
 
     def __str__(self):
         str = ("alpha:{}\n".format(self.alpha)
@@ -442,79 +507,12 @@ def data(file, D, aggregator = None):
 
 if __name__ == "__main__":
 
-    param = Param()
-    requiredOptList = ['-d']
     optList,argv = getopt(sys.argv[1:],'ha:b:l:L:D:I:e:d:AnVmo:')
     if not optList:
         optList.append(('-h', None))
     
-    # print optList
+    param = Param(optList)
 
-    for opt, arg in optList:
-        if opt == '-h':
-            print '''
-            \t\t -h\t  see help
-            \t\t -a\t  alpha for learning rate. default a = .1
-            \t\t -b\t  smooth parameter for adaptive learning rate. default b = 1.
-            \t\t -l\t  L1 regularization. default l = 1
-            \t\t -L\t  L2 regularization. default L = 1
-            \t\t -D\t  #categorical features for hashing trick. format: a**b. default D = 2**25
-            \t\t -I\t  enable interaction term. 0: Not enable interaction    1: enable with linear terms   2. enable without linear terms
-            \t\t -A\t  enable aggregation term.
-            \t\t -e\t  epoch. deault e = 1
-            \t\t -d\t  Required. data directory. 
-            \t\t -n\t  enable feature vector normalization.  x = x / | x | . Depressed.
-            \t\t -V\t  detect training cost
-            \t\t -m\t  enable multiple models. You need to define models in code directly.
-            \t\t -o\t  outputFile if necessary
-            '''
-            exit()
-
-        elif opt == '-a':
-            param.alpha = float(arg)
-        
-        elif opt == '-b':
-            param.beta = float(arg)
-        
-        elif opt == '-l':
-            param.L1 = float(arg)
-
-        elif opt == '-L':
-            param.L2 = float(arg)
-
-        elif opt == '-I':
-            param.interaction = int(arg)
-
-        elif opt == '-D':
-            base, pow = arg.split('**')
-            param.D = int(base) ** int(pow)
-    
-        elif opt == '-e':
-            param.epoch = int(arg)
-        
-        elif opt == '-d':
-            dataPath = arg
-
-        elif opt == '-A':
-            param.aggregation = True
-
-        elif opt == '-V':
-            param.detectTC = True
-        
-        elif opt == '-m':
-            param.multiple = True
-
-        elif opt == '-o':
-            param.oFile = arg
-        else:
-            print ('oops!unknown parameter {}' % opt)
-            exit(0)
-
-    for opt in requiredOptList:
-        if opt not in [opt[0] for opt in optList]:
-            print ("{} is required." % opt)
-            exit(0)
-    
     # initialize ourselves a learner
     if not param.multiple:
         learner = ftrl_proximal(param)
@@ -539,7 +537,7 @@ if __name__ == "__main__":
         if date == 20140710:
             continue
         for time in xrange(0,1440,10):
-            file = os.path.join(dataPath,str(date),str(time) + '.txt.gz')
+            file = os.path.join(param.dataPath,str(date),str(time) + '.txt.gz')
             # count log loss
             valLogLoss = 0 
             valCount = 0
