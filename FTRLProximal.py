@@ -208,6 +208,7 @@ class ftrl_proximal(object):
         # feature related parameters
         self.D = param.D
         self.interaction = param.interaction
+        self.norm = param.norm
 
         # model
         # n: squared sum of past gradients
@@ -283,7 +284,7 @@ class ftrl_proximal(object):
 
 
         # normalization 
-        if (param.norm):
+        if self.norm:
             wTx = wTx / sqrt(len(x))
 
         # cache the current w for update stage
@@ -317,7 +318,7 @@ class ftrl_proximal(object):
         g = p - y
     
         # update z and n
-        normConst = (1. / sqrt(len(x)) , 1. ) [not param.norm]
+        normConst = (1. / sqrt(len(x)) , 1. ) [not self.norm]
     
         for i, val in self._indices(x):
             g_i = normConst * g * val
