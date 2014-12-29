@@ -26,7 +26,7 @@ from csv import DictReader
 from math import exp, log, sqrt
 
 
-def getmalltagmap():
+def _getmalltagmap():
     map = {}
     with open('mallId.txt') as mallData:
         for line in mallData:
@@ -57,7 +57,7 @@ class Aggregator(object):
 
     def update(self,instance,y):
         for aggKey in self._keys: 
-            key_for_update = hash64(str(tuple([key+'_'+instance[key] for key in aggKey]))  # hash for memory issue
+            key_for_update = hash64(str(tuple([key+'_'+instance[key] for key in aggKey])))  # hash for memory issue
             temp_list = self._counter_map[key_for_update]
             if len(self._counter_map[key]) == self.mem_len:
                 temp_list.popleft()
@@ -66,7 +66,7 @@ class Aggregator(object):
     def gen_features(self,instance,logtime,D):
         # generate features based on instance's attribute.
         # For each key, we generate hash((bin(logtime-time[i]),i,lastY[i])) % D
-        for aggKey in self._indices(): 
+        for aggKey in self._keys: 
             key_for_feature = hash64(str(tuple([key+'_'+instance[key] for key in aggKey]))) 
             for idx, content in enumerate(self._counter_map[key_for_feature]):
                 time, lastY = content
@@ -75,7 +75,7 @@ class Aggregator(object):
 
 
 #############################################################################################
-#### Parameters #############################################################################
+# Parameters ################################################################################
 #############################################################################################
 
 class Param(object):
@@ -84,7 +84,7 @@ class Param(object):
         2. Instance processing parameters (about feature engineering): D(hashing trick), interaction, aggregation
         3. Training / Validation parameters: epoch, detectTC(whether to track training cost)
     '''
-    Param.optstr = 'a:b:l:L:D:I:e:A:V'
+    optstr = 'a:b:l:L:D:I:e:A:V'
 
     def __init__(self, opt_list):
         
@@ -100,7 +100,6 @@ class Param(object):
         self.aggregation = 0     # whether to enable the aggregator
         
         # D, training/validation
-        self.epoch = 1
         self.detectTC = False       # detect training logloss
 
         for opt, arg in opt_list:
@@ -260,7 +259,7 @@ class FtrlProximal(object):
         for i, val in self._indices(x):
             g_i = g * val
             sigma = (sqrt(n[i] + g_i * g_i) - sqrt(n[i])) / alpha
-            z[i] += normConst * g_i - sigma * w[i]
+            z[i] += g_i - sigma * w[i]
             n[i] += g_i * g_i
 
 
@@ -286,7 +285,7 @@ def datagenerator(filename):
             yield instance
 
 
-def process(instance, D, aggregator=None, malltagmap=getmalltagmap()):
+def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
     ''' GENERATOR: Apply hash-trick to the original csv row
                    and for simplicity, we one-hot-encode everything
 
@@ -426,10 +425,11 @@ def process(instance, D, aggregator=None, malltagmap=getmalltagmap()):
 ##############################################################################
 
 if __name__ == "__main__":
-    optstr = Param.optstr + 'd:'
+    optstr = Param.optstr + 'd:' + 'h'
     opt_list, argv =  getopt(sys.argv[1:],optstr)
-    if not opt_list or [ opt in opt_list if opt[0] == '-h']:
-        print ''' \t\t-h\t help
+    if not opt_list or [ opt for opt in opt_list if opt[0] == '-h']:
+        print ''' 
+                  \t\t-h\t help
                   \t\t-a\t learning rate. alpha. default = .1
                   \t\t-b\t learning rate. beta. default = 1.
                   \t\t-l\t L1 regularization. default = 1.
@@ -469,13 +469,12 @@ if __name__ == "__main__":
             
             valonlinelogloss = 0 # valonlinelogloss sums the online log loss
             
-            for i in xrange(param.epoch):
-                for instance in datagenerator(filename):
-                    x, y = process(instance, param.D, aggregator)
-                    p = learner.predict(x)
-                    valonlinelogloss += logloss(p,y)
-                    learner.update(x,p,y)
-                    if aggregator:
-                        aggregator.update(instance,y)
+            for instance in datagenerator(filename):
+                x, y = process(instance, param.D, aggregator)
+                p = learner.predict(x)
+                valonlinelogloss += logloss(p,y)
+                learner.update(x,p,y)
+                if aggregator:
+                    aggregator.update(instance,y)
                 
             print '{}:{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),vallogloss/valcount,valonlinelogloss/valcount)
