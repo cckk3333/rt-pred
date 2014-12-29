@@ -1,8 +1,12 @@
+# -*- coding: utf-8 -*-
+
 import sys
 from gzip import open
 from getopt import getopt
-from FTRLProximal import *
 from random import random
+
+from FTRLProximal import *
+
 
 class ModelRecord(object):
 
@@ -19,7 +23,7 @@ class ModelRecord(object):
     def update(self, p, y):
         self.imp += 1
         self.clk += y
-        self.sumLL = logloss(p, y)
+        self.sumLL += logloss(p, y)
 
 
 if __name__ == '__main__':
@@ -73,47 +77,43 @@ if __name__ == '__main__':
     aggregatorA = Aggregator() if paramA.aggregation else None
     aggregatorB = Aggregator() if paramB.aggregation else None
 
-    print 'date:time\tImpA\tClkA\tSumLLA\tImpB\tClkB\tSumLLB'
+    print 'ImpA\tClkA\tSumLLA\tImpB\tClkB\tSumLLB'
+    
     for date in xrange(20140701,20140731):
+        if date == 20140710:
+            continue
+
         for time in xrange(0,1440,10):
-            if date == 20140710:
-                continue
-            else:
-                fileStr = dataPath+'/'+str(date)+'/'+str(time)+'.txt.gz'
-                for instance in dataGenerator(fileStr):
-                    
-                    xA, y = process(instance.copy(), paramA.D, aggregatorA)
-                    pA = learnerA.predict(xA)
-                    xB, y = process(instance.copy(), paramB.D, aggregatorB)
-                    pB = learnerB.predict(xB)
-                    
-                    # share training data
-                    if mode:    
-                        # A wins
-                        if pA > pB or (pA == pB and random() > 1./2):
-                            recordA.update(pA, y)
-                        else:
-                            recordB.update(pB, y)
+            
+            fileStr = dataPath+'/'+str(date)+'/'+str(time)+'.txt.gz'
+            
+            for instance in dataGenerator(fileStr):
+                
+                xA, y = process(instance.copy(), paramA.D, aggregatorA)
+                pA = learnerA.predict(xA)
+                xB, y = process(instance.copy(), paramB.D, aggregatorB)
+                pB = learnerB.predict(xB)
+                
 
-                        # both update
-                        learnerA.update(xA, pA, y)
-                        learnerB.update(xB, pB, y)
-                        if aggregatorA:
-                            aggregatorA.update(instance, y)
-                        if aggregatorB:
-                            aggregatorB.update(instance, y)
+                if pA > pB or (pA == pB and random() > 1./2):
+                    record, x, p, learner, aggregator = recordA, xA, pA, learnerA, aggregatorA
+                else:
+                    record, x, p, learner, aggregator = recordB, xB, pB, learnerB, aggregatorB
 
-                    # not share training data
-                    else:
-                        if pA > pB or (pA == pB and random() > 1./2):
-                            recordA.update(pA, y)
-                            learnerA.update(xA, pA, y)
-                            if aggregatorA:
-                                aggregatorA.update(instance, y)
-                        else:
-                            recordB.update(pB, y)
-                            learnerB.update(xB, pB, y)
-                            if aggregatorB:
-                                aggregatorB.update(instance, y)
+                if not mode:
+                    record.update(p, y)
 
-                print '%d\t%d\t%f\t%d\t%d\t%f' % (recordA.imp, recordA.clk, recordA.sumLL, recordB.imp, recordB.clk, recordB.sumLL) 
+                    # both update
+                    learnerA.update(xA, pA, y)
+                    learnerB.update(xB, pB, y)
+                    if aggregatorA:
+                        aggregatorA.update(instance, y)
+                    if aggregatorB:
+                        aggregatorB.update(instance, y)
+                else:
+                    record.update(p, y)
+                    learner.update(x, p, y)
+                    if aggregator:
+                        aggregator.update(instance, y)
+
+            print '%d\t%d\t%f\t%d\t%d\t%f' % (recordA.imp, recordA.clk, recordA.sumLL, recordB.imp, recordB.clk, recordB.sumLL) 

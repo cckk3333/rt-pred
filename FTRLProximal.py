@@ -15,124 +15,96 @@ as the name is changed.
 '''
 
 
+import gzip
+import sys
+import os
+from getopt import getopt
+from collections import deque, defaultdict
+from mmh3 import hash, hash64
 from datetime import datetime, timedelta
 from csv import DictReader
 from math import exp, log, sqrt
-import sys 
-import gzip
-import os
-import mmh3
-import itertools
-import collections
-from getopt import getopt
 
-def selectLearner(learners, inst):
-    selected = None
-    for learner, predicate in learners:
-        if predicate(inst):
-            if selected == None:
-                selected = learner
-            else:
-                print "Mupltiple learners for an instance!!!!!"
-                exit(1)
 
-    if selected:
-        return selected    
-    else:
-        print "No learner!!!!!"
-        exit(1)
+def getmalltagmap():
+    map = {}
+    with open('mallId.txt') as mallData:
+        for line in mallData:
+            words = line.split()
+            map[words[0]] = words[1]       
 
-def myFloat(str):
+    return map
+
+
+def _tofloat(str):
     if str=='':
         return 0
     else:
         return float(str)
 
-##############################################################################
-# parameters #################################################################
-##############################################################################
 
-class Aggregator():
+class Aggregator(object):
+    ''' This class record the last ad time based on attributes, e.g, ('mallId','cookieId').
+        The attributes are hard coded in the constructor.
+    '''
     
-    # here: we record the time of last impression based on key
 
-    def __init__(self):
-        self.counterMap = collections.defaultdict(collections.deque)  # key : decay factor (unit: 10 mins ); value : corresponding counterDict
+    def __init__(self, mem_len):
+        # mem_len defines the max list length for each key. 
+        self._counter_map = defaultdict(deque)  
         self._keys = [('mallId','cookieId')] 
-        self.memoryLen = 5
-
-    def _indices(self):
-        for key in self._keys:
-            yield key
-
-        '''
-        for r in xrange(len(self._keys)):
-            for com in itertools.combinations(self._keys,r+1):
-                yield com
-        '''
+        self.mem_len = mem_len
 
     def update(self,instance,y):
-        for aggKey in self._indices(): # aggKey is somthing like ('publisher'), ('publiserId, mallId') 
-            keyForUpdate = tuple([key+'_'+instance[key] for key in aggKey]) # keyForUpdate is somthing like ('publisherId_123213'), ('publiserId_12312312,mallId_123')
-            tempList = self.counterMap[keyForUpdate]
-            if len(tempList) == self.memoryLen:
-                tempList.popleft()
-            tempList.append((self.time,y))
+        for aggKey in self._keys: 
+            key_for_update = hash64(str(tuple([key+'_'+instance[key] for key in aggKey]))  # hash for memory issue
+            temp_list = self._counter_map[key_for_update]
+            if len(self._counter_map[key]) == self.mem_len:
+                temp_list.popleft()
+            temp_list.append((self.time,y))
                 
-    def genFeatures(self,instance,logTime,D):
-        # default: generate CTR feature 
-        # Other features for future work: pseudo CTR, #click, #imp 
-        for aggKey in self._indices(): # aggKey is somthing like ('publisher'), ('publiserId, mallId') 
-            keyForFeature = tuple([key+'_'+instance[key] for key in aggKey]) # keyForFeature is somthing like ('publisherId_123213'), ('publiserId_12312312,mallId_123')
-            for idx, content in enumerate(self.counterMap[keyForFeature]):
+    def gen_features(self,instance,logtime,D):
+        # generate features based on instance's attribute.
+        # For each key, we generate hash((bin(logtime-time[i]),i,lastY[i])) % D
+        for aggKey in self._indices(): 
+            key_for_feature = hash64(str(tuple([key+'_'+instance[key] for key in aggKey]))) 
+            for idx, content in enumerate(self._counter_map[key_for_feature]):
                 time, lastY = content
-                val = int(log((logTime - time).total_seconds() + 1.)) 
-                yield mmh3.hash(str(aggKey)+'_'+str(idx)+'_'+str((val,lastY))) % D , 1.
+                val = int(log((logtime - time).total_seconds() + 1.)) 
+                yield abs(hash(str(aggKey)+'_'+str(idx)+'_'+str((val,lastY)))) % D , 1.
 
 
-class Param():
-    def __init__(self, args):
-        # B, model
-        self.alpha = .1  # learning rate
-        self.beta = 1.   # smoothing parameter for adaptive learning rate
-        self.L1 = 1.     # L1 regularization, larger value means more regularized
-        self.L2 = 1.     # L2 regularization, larger value means more regularized
+#############################################################################################
+#### Parameters #############################################################################
+#############################################################################################
 
-        # C, feature/hash trick
-        self.D = 2 ** 25             # number of categorical weights to use
-        self.interaction = False     # whether to enable poly2 feature interactions
-        self.aggregation = False     # whether to enable the aggregator
-        self.norm = False            # whether to normalize the feature vector length  ( x <- x / sqrt(len(x))))
-        self.multiple = False        # whether to enable multiple models. If yes, please define models in code directly.
-        self.oFile = ''
+class Param(object):
+    ''' This class has the following:
+        1. FTRL-Proximal model parameters: alpha, beta, L1, L2
+        2. Instance processing parameters (about feature engineering): D(hashing trick), interaction, aggregation
+        3. Training / Validation parameters: epoch, detectTC(whether to track training cost)
+    '''
+    Param.optstr = 'a:b:l:L:D:I:e:A:V'
 
+    def __init__(self, opt_list):
+        
+        # model
+        self.alpha = .1  
+        self.beta = 1.   
+        self.L1 = 1.     
+        self.L2 = 1.     
+
+        # feature/hash trick
+        self.D = 2 ** 25            
+        self.interaction = 0         # 0: linear /  1: poly2 with linear / 2: poly2 without linear
+        self.aggregation = 0     # whether to enable the aggregator
+        
         # D, training/validation
-        self.epoch = 1       # learn training data for N pass
+        self.epoch = 1
         self.detectTC = False       # detect training logloss
 
-
-        optList,argv = getopt(args,'ha:b:l:L:D:I:e:AnVmo:')
-        for opt, arg in optList:
-            if opt == '-h':
-                print '''
-                \t\t -h\t  see help
-                \t\t -a\t  alpha for learning rate. default a = .1
-                \t\t -b\t  smooth parameter for adaptive learning rate. default b = 1.
-                \t\t -l\t  L1 regularization. default l = 1
-                \t\t -L\t  L2 regularization. default L = 1
-                \t\t -D\t  #categorical features for hashing trick. format: a**b. default D = 2**25
-                \t\t -I\t  enable interaction term. 0: Not enable interaction    1: enable with linear terms   2. enable without linear terms
-                \t\t -A\t  enable aggregation term.
-                \t\t -e\t  epoch. deault e = 1
-                \t\t -d\t  Required. data directory. 
-                \t\t -n\t  enable feature vector normalization.  x = x / | x | . Depressed.
-                \t\t -V\t  detect training cost
-                \t\t -m\t  enable multiple models. You need to define models in code directly.
-                \t\t -o\t  outputFile if necessary
-                '''
-                exit()
-
-            elif opt == '-a':
+        for opt, arg in opt_list:
+            if opt == '-a':    
                 self.alpha = float(arg)
             
             elif opt == '-b':
@@ -150,44 +122,16 @@ class Param():
             elif opt == '-D':
                 base, pow = arg.split('**')
                 self.D = int(base) ** int(pow)
-        
-            elif opt == '-e':
-                self.epoch = int(arg)
 
             elif opt == '-A':
-                self.aggregation = True
-
-            elif opt == '-V':
-                self.detectTC = True
-            
-            elif opt == '-m':
-                self.multiple = True
-
-            elif opt == '-o':
-                self.oFile = arg
-            else:
-                print ('oops!unknown selfeter {}' % opt)
-                exit(0)
-        
-
-    def __str__(self):
-        str = ("alpha:{}\n".format(self.alpha)
-        +  "beta:{}\n".format(self.beta) 
-        +  "L1:{}\n".format(self.L1) 
-        +  "L2:{}\n".format(self.L2)
-        +  "D:{}\n".format(self.D) 
-        +  "interaction:{}\n".format(self.interaction) 
-        +  "aggregation:{}\n".format(self.aggregation))
-        
-        return str
-
-        
-        
+                self.aggregation = int(arg)
+    
+                
 ##############################################################################
 # class, function, generator definitions #####################################
 ##############################################################################
 
-class ftrl_proximal(object):
+class FtrlProximal(object):
     ''' Our main algorithm: Follow the regularized leader - proximal
 
         In short,
@@ -208,7 +152,6 @@ class ftrl_proximal(object):
         # feature related parameters
         self.D = param.D
         self.interaction = param.interaction
-        self.norm = param.norm
 
         # model
         # n: squared sum of past gradients
@@ -228,7 +171,7 @@ class ftrl_proximal(object):
         # first yield index of the bias term
         yield 0, 1.
 
-        # then yield the normal indices
+        # then yield the linear indices
         if self.interaction != 2:
             for i,val in x:
                 yield i,val
@@ -242,7 +185,7 @@ class ftrl_proximal(object):
             for i in xrange(L):
                 for j in xrange(i+1, L):
                     # one-hot encode interactions with hash trick
-                    yield abs(hash(str(x[i]) + '_' + str(x[j]))) % D, x[i][1]*x[j][1]
+                    yield abs(hash(str(x[i][0]) + '_' + str(x[j][0]))) % D, x[i][1]*x[j][1]
 
     def predict(self, x):
         ''' Get probability estimation on x
@@ -283,10 +226,6 @@ class ftrl_proximal(object):
             wTx += w[i] * val
 
 
-        # normalization 
-        if self.norm:
-            wTx = wTx / sqrt(len(x))
-
         # cache the current w for update stage
         self.w = w
 
@@ -318,10 +257,8 @@ class ftrl_proximal(object):
         g = p - y
     
         # update z and n
-        normConst = (1. / sqrt(len(x)) , 1. ) [not self.norm]
-    
         for i, val in self._indices(x):
-            g_i = normConst * g * val
+            g_i = g * val
             sigma = (sqrt(n[i] + g_i * g_i) - sqrt(n[i])) / alpha
             z[i] += normConst * g_i - sigma * w[i]
             n[i] += g_i * g_i
@@ -341,24 +278,15 @@ def logloss(p, y):
     p = max(min(p, 1. - 10e-15), 10e-15)
     return -log(p) if y == 1. else -log(1. - p)
 
-def getMallCategoryMap():
-    map = {}
-    with open('mallId.txt') as mallData:
-        for line in mallData:
-            words = line.split()
-            map[words[0]] = words[1]       
 
-    return map
-
-
-def dataGenerator(fileStr):
-    with gzip.open(fileStr) as dataFile:
-        dataReader = DictReader(dataFile,delimiter='\t')
-        for instance in dataReader:
+def datagenerator(filename):
+    with gzip.open(filename) as datafile:
+        datareader = DictReader(datafile,delimiter='\t')
+        for instance in datareader:
             yield instance
 
 
-def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
+def process(instance, D, aggregator=None, malltagmap=getmalltagmap()):
     ''' GENERATOR: Apply hash-trick to the original csv row
                    and for simplicity, we one-hot-encode everything
 
@@ -373,7 +301,7 @@ def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
             y: y = 1 if we have a click, else we have y = 0
     '''
     
-    timeFormat = '%Y%m%d%H%M%S'
+    time_format = '%Y%m%d%H%M%S'
     
     # process target
     try:
@@ -383,82 +311,74 @@ def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
         # delete useless feature
         del instance['impToken']
         del instance['userSegment']
-        instance['campaign'] = instance['mallId'] + '_' + instance['campaign']
-        #del instance['campaign']
-        instance['publisherChannel'] = instance['publisher'] + '_' + instance['publisherChannel']
-        #del instance['publisherChannel']
-        siteCategory = instance['siteCategory']
+        site_category = instance['siteCategory']
         del instance['siteCategory']
         del instance['directDeal']
         del instance['adViewBeginTimeOfLastSession']
     
-
+        # campaign should be a subcategory of mall / publisherChannel should be a subcateogory of publisher
+        instance['campaign'] = instance['mallId'] + '_' + instance['campaign']
+        instance['publisherChannel'] = instance['publisher'] + '_' + instance['publisherChannel']
+        
         # feature Engineering
-        logTime = datetime.strptime(instance['logTime'],timeFormat)
-        lastVisitTime = datetime.strptime(instance['lastVisitTime'],timeFormat)
+
+        ##  binning
+        instance['visitSessions'] = int(2.5 * log(_tofloat(instance['visitSessions']))) 
+        instance['visitsOfLastSession'] = int(2.5 * log(_tofloat(instance['visitsOfLastSession'])))
+        instance['maxVisitsOfSession'] = int(log(_tofloat(instance['maxVisitsOfSession'])))
+        instance['buySessions'] = int(2.5 * _tofloat(instance['buySessions']) + 1)
+        instance['adViewsOfLastSession'] = int(2.5 * log( _tofloat(instance['adViewsOfLastSession']) + 1))
+        instance['adEffectiveViewsOfLastSession'] = int(2.5 * log(_tofloat(instance['adEffectiveViewsOfLastSession']) + 1))
+        instance['adViewsSinceLastVisit'] = int(2.5 * log(_tofloat(instance['adViewsSinceLastVisit']) + 1))                    
+        instance['adSessions'] = int(2.5 * log(_tofloat(instance['adSessions']) + 1))
+        instance['decayedAdSessions'] = int(2.5 * log(_tofloat(instance['decayedAdSessions'] ) + 1))
+        instance['adEffectiveViewsSinceLastVisit'] = int(2.5 * log(_tofloat(instance['adEffectiveViewsSinceLastVisit'] ) + 1))
+        
+        ## process time 
+        logtime = datetime.strptime(instance['logTime'],time_format)
+        lastvisittime = datetime.strptime(instance['lastVisitTime'],time_format)
         del instance['logTime']
         del instance['lastVisitTime']
         
-        instance['logT'] = ( logTime.hour * 60 + logTime.minute) / 30
-        instance['logD'] = logTime.day
-        instance['logW'] = logTime.weekday()
-        instance['lastT'] =  ( lastVisitTime.hour * 60 + lastVisitTime.minute ) / 30
-        instance['lastD'] = lastVisitTime.day
-        instance['lastW'] = lastVisitTime.weekday()
-        instance['tdLogLast'] = int(log((logTime - lastVisitTime).total_seconds() / 360.+ 1))
-
-        ##  binning
-        instance['visitSessions'] = int(2.5 * log(myFloat(instance['visitSessions']))) 
-        instance['visitsOfLastSession'] = int(2.5 * log(myFloat(instance['visitsOfLastSession'])))
-        instance['maxVisitsOfSession'] = int(log(myFloat(instance['maxVisitsOfSession'])))
-        instance['buySessions'] = int(2.5 * myFloat(instance['buySessions']) + 1)
-        instance['adViewsOfLastSession'] = int(2.5 * log( myFloat(instance['adViewsOfLastSession']) + 1))
-        instance['adEffectiveViewsOfLastSession'] = int(2.5 * log(myFloat(instance['adEffectiveViewsOfLastSession']) + 1))
-        instance['adViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adViewsSinceLastVisit']) + 1))                    
-        instance['adSessions'] = int(2.5 * log(myFloat(instance['adSessions']) + 1))
-        instance['decayedAdSessions'] = int(2.5 * log(myFloat(instance['decayedAdSessions'] ) + 1))
-        instance['adEffectiveViewsSinceLastVisit'] = int(2.5 * log(myFloat(instance['adEffectiveViewsSinceLastVisit'] ) + 1))
-        
+        instance['logT'] = ( logtime.hour * 60 + logtime.minute) / 30
+        instance['logD'] = logtime.day
+        instance['logW'] = logtime.weekday()
+        instance['lastT'] =  ( lastvisittime.hour * 60 + lastvisittime.minute ) / 30
+        instance['lastD'] = lastvisittime.day
+        instance['lastW'] = lastvisittime.weekday()
+        instance['tdLogLast'] = int(log((logtime - lastvisittime).total_seconds() / 360.+ 1))
         
         ## lastBuySessionTime
         if instance['lastBuySessionTime']:
-            lastBST = datetime.strptime(instance['lastBuySessionTime'],timeFormat)
-            tdLogBST = logTime - lastBST
-            tdLastBST = lastVisitTime - lastBST
+            lastbst = datetime.strptime(instance['lastBuySessionTime'],time_format)
+            td_log_bst = logtime - lastbst
+            td_last_bst = lastvisittime - lastbst
             
-            instance['tdLogBST'] = int(log(tdLogBST.total_seconds() / 360. + 1))
-            if tdLastBST.days < 0:
+            instance['tdLogBST'] = int(log(td_log_bst.total_seconds() / 360. + 1))
+            if td_last_bst.days < 0:
                 instance['tdLastBST'] = -1
             else:
-                instance['tdLastBST'] = int(log(tdLastBST.total_seconds() / 360. + 1))
-       
-        else:
-            tdLastBST = 100000000 # just a huge number
-            tdLogBST = 100000000 
+                instance['tdLastBST'] = int(log(td_last_bst.total_seconds() / 360. + 1))
 
         del instance['lastBuySessionTime']
         
         ## findPriceTagTime
         if instance['findPriceTagTime']:
-            ft = datetime.strptime(instance['findPriceTagTime'],timeFormat)
-            tdLogFt = logTime - ft
-            tdLastFt = lastVisitTime - ft
-            instance['tdLogFt'] = int(log(tdLogFt.total_seconds() / 360. + 1))
-            instance['tdLastFt'] =(-1,1)[tdLastFt.days >= 0]* (int( log( abs(tdLastFt.total_seconds()) / 360. + 1)) + 1)
-        
-        else:
-            instance['tdLogFt'] = 100000000
-            instance['tdLastFt'] = 100000000
+            ft = datetime.strptime(instance['findPriceTagTime'],time_format)
+            td_log_ft = logtime - ft
+            td_last_ft = lastvisittime - ft
+            instance['tdLogFt'] = int(log(td_log_ft.total_seconds() / 360. + 1))
+            instance['tdLastFt'] =(-1,1)[td_last_ft.days >= 0]* (int( log( abs(td_last_ft.total_seconds()) / 360. + 1)) + 1)
         
         del instance['findPriceTagTime']
 
 
         # manually generated feature:  Generating features by myself!!!!!!!!!!!!!!!!!!!!!!!!
         
-        if not mallCategoryMap[instance['mallId']]:
+        if not malltagmap[instance['mallId']]:
             print "cannot find mall category. Mall ID:".format(instance['mallId'])
         
-        instance['mallCategory'] = mallCategoryMap[instance['mallId']]
+        instance['mallCategory'] = malltagmap[instance['mallId']]
         
 
         #build categorical features
@@ -466,12 +386,12 @@ def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
 
         for k, v in instance.iteritems():
             # one-hot encode everything with hash trick
-            index = abs(mmh3.hash(k + '_' + str(v))) % D 
+            index = abs(hash(k + '_' + str(v))) % D 
             x.append((index,1.))
 
         #build numerical features
-        if siteCategory:
-            for category in siteCategory.split('|'):
+        if site_category:
+            for category in site_category.split('|'):
             
                 words = category.split(':');
                 try:
@@ -479,16 +399,17 @@ def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
                 except BaseException:
                     exit(0)
 
-                x.append((mmh3.hash('siteCategory_'+catId) % D, val))
+                x.append((abs(hash('siteCategory_'+catId)) % D, val))
 
         #build aggregator numerical feature
         if aggregator:
-            
-            for feature in aggregator.genFeatures(instance,logTime,D):
+                
+            for feature in aggregator.gen_features(instance,logtime,D):
                 x.append(feature)
             
-            aggregator.time = logTime
-        
+            aggregator.time = logtime
+            
+
     except BaseException as error:
         print error
         print 'Error on line {}'.format(sys.exc_info()[-1].tb_lineno)
@@ -505,76 +426,56 @@ def process(instance, D, aggregator=None, mallCategoryMap=getMallCategoryMap()):
 ##############################################################################
 
 if __name__ == "__main__":
-    optList, argv =  (getopt(sys.argv[1:3],'d:'))
-    dataPath = optList[0][1] 
-    
-    param = Param(sys.argv[3:])
+    optstr = Param.optstr + 'd:'
+    opt_list, argv =  getopt(sys.argv[1:],optstr)
+    if not opt_list or [ opt in opt_list if opt[0] == '-h']:
+        print ''' \t\t-h\t help
+                  \t\t-a\t learning rate. alpha. default = .1
+                  \t\t-b\t learning rate. beta. default = 1.
+                  \t\t-l\t L1 regularization. default = 1.
+                  \t\t-L\t L2 regularization. default = 1.
+                  \t\t-D\t feature dimensions for hash trick. format: a**b. default = 2**20 
+                  \t\t-A\t memory length for aggregator. Aggregator disabled if 0. default = 0
+                  \t\t-d\t data path. Required.
+              '''
+        exit(0)
 
-    # initialize ourselves a learner
-    if not param.multiple:
-        learner = ftrl_proximal(param)
+    for opt,arg in opt_list:
+        if opt == '-d':
+            datapath = arg
 
-    else:
-        learners = []
-        learners.append((ftrl_proximal(param),lambda inst:inst['mobilePlatform'] ))
-        learners.append((ftrl_proximal(param),lambda inst:not inst['mobilePlatform'] ))
-    
+    param_opt_list = [opt for opt in opt_list if opt[0] != '-d']
+    param = Param(param_opt_list)
+    learner = FtrlProximal(param)
+
     # start training
-    if not param.detectTC:
-        print 'date:time\telapsed time\tvalidation batch logloss\tvalidation online logloss'
-    else:
-        print 'date:time\telapsed time\tvalidation batch logloss\tvalidation online logloss\ttraining batch logloss'
+    print 'date:time\telapsed time\tvalidation batch logloss\tvalidation online logloss'
     
     startTime = datetime.now()
-    aggregator = ( None, Aggregator() ) [param.aggregation]
+    aggregator = Aggregator(param.aggregation) if param.aggregation else None
 
-    if param.oFile:
-        wf = file.open(param.oFile,'wb')
     for date in xrange(20140701,20140731):
         if date == 20140710:
             continue
         for time in xrange(0,1440,10):
-            fileStr = os.path.join(dataPath,str(date),str(time) + '.txt.gz')
-            # count log loss
-            valLogLoss = 0 
-            valCount = 0
-            for instance in dataGenerator(fileStr):
-                x, y = process(instance, param.D)
-                if param.multiple:
-                    learner = selectLearner(learners,instance)                
-                valLogLoss += logloss(learner.predict(x),y)
-                valCount += 1
+            filename = os.path.join(datapath,str(date),str(time) + '.txt.gz')
             
-            valOnlineLogLoss = 0
+            vallogloss = 0 # vallogloss sums the batch log loss 
+            valcount = 0
+            for instance in datagenerator(filename):
+                x, y = process(instance, param.D, aggregator)                
+                vallogloss += logloss(learner.predict(x),y)
+                valcount += 1
             
-            if param.detectTC:
-                trainingBatchLogLossList = []
+            valonlinelogloss = 0 # valonlinelogloss sums the online log loss
             
             for i in xrange(param.epoch):
-                trainLogLoss = 0
-                for instance in dataGenerator(fileStr):
-                    x, y = process(instance, param.D)
-                    if param.multiple:
-                        learner = selectLearner(learners,instance)
+                for instance in datagenerator(filename):
+                    x, y = process(instance, param.D, aggregator)
                     p = learner.predict(x)
-                    if param.oFile:
-                        wf.write('{} {}\n'.format(y,p))
-                    valOnlineLogLoss += logloss(p,y)
+                    valonlinelogloss += logloss(p,y)
                     learner.update(x,p,y)
                     if aggregator:
                         aggregator.update(instance,y)
                 
-                if param.detectTC:
-                    trainingBatchLogLoss = 0
-                    for instance in dataGenerator(fileStr):
-                        x, y = process(instance,param.D)
-                        if param.multiple:
-                            learner = selectLearner(learners,instance)
-                        p = learner.predict(x)
-                        trainingBatchLogLoss += logloss(p,y)
-                    trainingBatchLogLossList.append(trainingBatchLogLoss / valCount)
-
-            if not param.detectTC:
-                print '{}:{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),valLogLoss/valCount,valOnlineLogLoss/valCount)
-            else:
-                print '{}:{}\t{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),valLogLoss/valCount,valOnlineLogLoss/valCount,trainingBatchLogLossList)
+            print '{}:{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),vallogloss/valcount,valonlinelogloss/valcount)
