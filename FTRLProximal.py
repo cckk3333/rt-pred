@@ -47,30 +47,30 @@ class Aggregator(object):
     ''' This class record the last ad time based on attributes, e.g, ('mallId','cookieId').
         The attributes are hard coded in the constructor.
     '''
-    
+
 
     def __init__(self, mem_len):
         # mem_len defines the max list length for each key. 
-        self._counter_map = defaultdict(deque)  
-        self._keys = [('mallId','cookieId')] 
+        self._counter_map = defaultdict(deque)
+        self._keys = [('mallId','cookieId')]
         self.mem_len = mem_len
 
     def update(self,instance,y):
-        for aggKey in self._keys: 
+        for aggKey in self._keys:
             key_for_update = hash64(str(tuple([key+'_'+instance[key] for key in aggKey])))  # hash for memory issue
             temp_list = self._counter_map[key_for_update]
-            if len(self._counter_map[key]) == self.mem_len:
+            if len(temp_list) == self.mem_len:
                 temp_list.popleft()
             temp_list.append((self.time,y))
-                
+
     def gen_features(self,instance,logtime,D):
         # generate features based on instance's attribute.
         # For each key, we generate hash((bin(logtime-time[i]),i,lastY[i])) % D
-        for aggKey in self._keys: 
-            key_for_feature = hash64(str(tuple([key+'_'+instance[key] for key in aggKey]))) 
+        for aggKey in self._keys:
+            key_for_feature = hash64(str(tuple([key+'_'+instance[key] for key in aggKey])))
             for idx, content in enumerate(self._counter_map[key_for_feature]):
                 time, lastY = content
-                val = int(log((logtime - time).total_seconds() + 1.)) 
+                val = int(log((logtime - time).total_seconds() + 1.))
                 yield abs(hash(str(aggKey)+'_'+str(idx)+'_'+str((val,lastY)))) % D , 1.
 
 
@@ -87,28 +87,28 @@ class Param(object):
     optstr = 'a:b:l:L:D:I:e:A:V'
 
     def __init__(self, opt_list):
-        
+
         # model
-        self.alpha = .1  
-        self.beta = 1.   
-        self.L1 = 1.     
-        self.L2 = 1.     
+        self.alpha = .1
+        self.beta = 1.
+        self.L1 = 1.
+        self.L2 = 1.
 
         # feature/hash trick
-        self.D = 2 ** 25            
+        self.D = 2 ** 25
         self.interaction = 0         # 0: linear /  1: poly2 with linear / 2: poly2 without linear
         self.aggregation = 0     # whether to enable the aggregator
-        
+
         # D, training/validation
         self.detectTC = False       # detect training logloss
 
         for opt, arg in opt_list:
-            if opt == '-a':    
+            if opt == '-a':
                 self.alpha = float(arg)
-            
+
             elif opt == '-b':
                 self.beta = float(arg)
-            
+
             elif opt == '-l':
                 self.L1 = float(arg)
 
@@ -124,8 +124,8 @@ class Param(object):
 
             elif opt == '-A':
                 self.aggregation = int(arg)
-    
-                
+
+
 ##############################################################################
 # class, function, generator definitions #####################################
 ##############################################################################
@@ -162,10 +162,10 @@ class FtrlProximal(object):
 
     def _indices(self, x):
         ''' A helper generator that yields the indices in x
-        
+
             The purpose of this generator is to make the following
             code a bit cleaner when doing feature interaction.
-        ''' 
+        '''
 
         # first yield index of the bias term
         yield 0, 1.
@@ -254,7 +254,7 @@ class FtrlProximal(object):
 
         # gradient under logloss
         g = p - y
-    
+
         # update z and n
         for i, val in self._indices(x):
             g_i = g * val
@@ -299,9 +299,9 @@ def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
                we only need the index since all values are either 0 or 1
             y: y = 1 if we have a click, else we have y = 0
     '''
-    
+
     time_format = '%Y%m%d%H%M%S'
-    
+
     # process target
     try:
         y = (0.0,1.0)[instance['y']=='1']
@@ -314,31 +314,31 @@ def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
         del instance['siteCategory']
         del instance['directDeal']
         del instance['adViewBeginTimeOfLastSession']
-    
+
         # campaign should be a subcategory of mall / publisherChannel should be a subcateogory of publisher
         instance['campaign'] = instance['mallId'] + '_' + instance['campaign']
         instance['publisherChannel'] = instance['publisher'] + '_' + instance['publisherChannel']
-        
+
         # feature Engineering
 
         ##  binning
-        instance['visitSessions'] = int(2.5 * log(_tofloat(instance['visitSessions']))) 
+        instance['visitSessions'] = int(2.5 * log(_tofloat(instance['visitSessions'])))
         instance['visitsOfLastSession'] = int(2.5 * log(_tofloat(instance['visitsOfLastSession'])))
         instance['maxVisitsOfSession'] = int(log(_tofloat(instance['maxVisitsOfSession'])))
         instance['buySessions'] = int(2.5 * _tofloat(instance['buySessions']) + 1)
         instance['adViewsOfLastSession'] = int(2.5 * log( _tofloat(instance['adViewsOfLastSession']) + 1))
         instance['adEffectiveViewsOfLastSession'] = int(2.5 * log(_tofloat(instance['adEffectiveViewsOfLastSession']) + 1))
-        instance['adViewsSinceLastVisit'] = int(2.5 * log(_tofloat(instance['adViewsSinceLastVisit']) + 1))                    
+        instance['adViewsSinceLastVisit'] = int(2.5 * log(_tofloat(instance['adViewsSinceLastVisit']) + 1))
         instance['adSessions'] = int(2.5 * log(_tofloat(instance['adSessions']) + 1))
         instance['decayedAdSessions'] = int(2.5 * log(_tofloat(instance['decayedAdSessions'] ) + 1))
         instance['adEffectiveViewsSinceLastVisit'] = int(2.5 * log(_tofloat(instance['adEffectiveViewsSinceLastVisit'] ) + 1))
-        
+
         ## process time 
         logtime = datetime.strptime(instance['logTime'],time_format)
         lastvisittime = datetime.strptime(instance['lastVisitTime'],time_format)
         del instance['logTime']
         del instance['lastVisitTime']
-        
+
         instance['logT'] = ( logtime.hour * 60 + logtime.minute) / 30
         instance['logD'] = logtime.day
         instance['logW'] = logtime.weekday()
@@ -346,13 +346,13 @@ def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
         instance['lastD'] = lastvisittime.day
         instance['lastW'] = lastvisittime.weekday()
         instance['tdLogLast'] = int(log((logtime - lastvisittime).total_seconds() / 360.+ 1))
-        
+
         ## lastBuySessionTime
         if instance['lastBuySessionTime']:
             lastbst = datetime.strptime(instance['lastBuySessionTime'],time_format)
             td_log_bst = logtime - lastbst
             td_last_bst = lastvisittime - lastbst
-            
+
             instance['tdLogBST'] = int(log(td_log_bst.total_seconds() / 360. + 1))
             if td_last_bst.days < 0:
                 instance['tdLastBST'] = -1
@@ -360,7 +360,7 @@ def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
                 instance['tdLastBST'] = int(log(td_last_bst.total_seconds() / 360. + 1))
 
         del instance['lastBuySessionTime']
-        
+
         ## findPriceTagTime
         if instance['findPriceTagTime']:
             ft = datetime.strptime(instance['findPriceTagTime'],time_format)
@@ -368,30 +368,30 @@ def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
             td_last_ft = lastvisittime - ft
             instance['tdLogFt'] = int(log(td_log_ft.total_seconds() / 360. + 1))
             instance['tdLastFt'] =(-1,1)[td_last_ft.days >= 0]* (int( log( abs(td_last_ft.total_seconds()) / 360. + 1)) + 1)
-        
+
         del instance['findPriceTagTime']
 
 
         # manually generated feature:  Generating features by myself!!!!!!!!!!!!!!!!!!!!!!!!
-        
+
         if not malltagmap[instance['mallId']]:
             print "cannot find mall category. Mall ID:".format(instance['mallId'])
-        
+
         instance['mallCategory'] = malltagmap[instance['mallId']]
-        
+
 
         #build categorical features
         x = []
 
         for k, v in instance.iteritems():
             # one-hot encode everything with hash trick
-            index = abs(hash(k + '_' + str(v))) % D 
+            index = abs(hash(k + '_' + str(v))) % D
             x.append((index,1.))
 
         #build numerical features
         if site_category:
             for category in site_category.split('|'):
-            
+
                 words = category.split(':');
                 try:
                     catId, val = words[0], float(words[1])
@@ -416,7 +416,7 @@ def process(instance, D, aggregator=None, malltagmap=_getmalltagmap()):
             print k,v
         exit(0)
 
-    
+
     return x, y
 
 
@@ -428,13 +428,13 @@ if __name__ == "__main__":
     optstr = Param.optstr + 'd:' + 'h'
     opt_list, argv =  getopt(sys.argv[1:],optstr)
     if not opt_list or [ opt for opt in opt_list if opt[0] == '-h']:
-        print ''' 
+        print '''
                   \t\t-h\t help
                   \t\t-a\t learning rate. alpha. default = .1
                   \t\t-b\t learning rate. beta. default = 1.
                   \t\t-l\t L1 regularization. default = 1.
                   \t\t-L\t L2 regularization. default = 1.
-                  \t\t-D\t feature dimensions for hash trick. format: a**b. default = 2**20 
+                  \t\t-D\t feature dimensions for hash trick. format: a**b. default = 2**20
                   \t\t-A\t memory length for aggregator. Aggregator disabled if 0. default = 0
                   \t\t-d\t data path. Required.
               '''
@@ -450,7 +450,7 @@ if __name__ == "__main__":
 
     # start training
     print 'date:time\telapsed time\tvalidation batch logloss\tvalidation online logloss'
-    
+
     startTime = datetime.now()
     aggregator = Aggregator(param.aggregation) if param.aggregation else None
 
@@ -459,16 +459,16 @@ if __name__ == "__main__":
             continue
         for time in xrange(0,1440,10):
             filename = os.path.join(datapath,str(date),str(time) + '.txt.gz')
-            
+
             vallogloss = 0 # vallogloss sums the batch log loss 
             valcount = 0
             for instance in datagenerator(filename):
-                x, y = process(instance, param.D, aggregator)                
+                x, y = process(instance, param.D, aggregator)
                 vallogloss += logloss(learner.predict(x),y)
                 valcount += 1
-            
+
             valonlinelogloss = 0 # valonlinelogloss sums the online log loss
-            
+
             for instance in datagenerator(filename):
                 x, y = process(instance, param.D, aggregator)
                 p = learner.predict(x)
@@ -476,5 +476,5 @@ if __name__ == "__main__":
                 learner.update(x,p,y)
                 if aggregator:
                     aggregator.update(instance,y)
-                
+
             print '{}:{}\t{}\t{}\t{}'.format( date,time,(datetime.now()-startTime).total_seconds(),vallogloss/valcount,valonlinelogloss/valcount)
